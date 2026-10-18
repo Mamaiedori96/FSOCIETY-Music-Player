@@ -1,8 +1,16 @@
 
 import os
+import json
+import io
+import random
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox
+
 import pygame
+from mutagen.id3 import ID3
+from PIL import Image, ImageTk, ImageDraw
+
 
 
 
@@ -14,26 +22,34 @@ RED_DARK = "#8f0000"
 WHITE = "#eeeeee"
 GREY = "#999999"
 
+APP_DIR = Path(os.getenv("APPDATA") or Path.home()) / "FSOCIETY_Music_Player"
+APP_DIR.mkdir(parents=True, exist_ok=True)
+DATA_FILE = APP_DIR / "library.json"
+
+
+
+
+
 fereastra = tk.Tk()
 fereastra.title("FSOCIETY // MUSIC PLAYER")
 fereastra.geometry("1000x650")
 fereastra.minsize(850, 550)
 fereastra.configure(bg=BG)
 
+audio_functional = False
+
 try:
     pygame.mixer.init()
     audio_functional = True
 except pygame.error as eroare:
-    audio_functional = False
     print("Eroare audio:", eroare)
-
-
-
 
 melodii = []
 index_curent = -1
 este_pauza = False
+shuffle_activ = False
 volum = 0.7
+coperta_foto = None
 
 titlu_curent = tk.StringVar(value="NO TRACK SELECTED")
 status = tk.StringVar(value="SYSTEM READY // WAITING FOR INPUT")
@@ -42,14 +58,79 @@ pagina_curenta = tk.StringVar(value="HOME")
 
 
 
+def incarca_melodii():
+    try:
+        date = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+
+        if isinstance(date, list):
+            return list(dict.fromkeys(
+                cale for cale in date
+                if isinstance(cale, str) and os.path.isfile(cale)
+            ))
+
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return []
+
+
+def salveaza_melodii():
+    try:
+        fisier_temporar = DATA_FILE.with_suffix(".tmp")
+        fisier_temporar.write_text(
+            json.dumps(melodii, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+        fisier_temporar.replace(DATA_FILE)
+
+    except OSError as eroare:
+        messagebox.showerror(
+            "FSOCIETY",
+            f"Biblioteca nu a putut fi salvată:\n{eroare}"
+        )
+
+
 def actualizeaza_titlu():
     if 0 <= index_curent < len(melodii):
         nume = os.path.basename(melodii[index_curent])
         titlu_curent.set(nume)
-        status.set(f"NOW PLAYING // {index_curent + 1}/{len(melodii)}")
+        status.set(
+            f"NOW PLAYING // {index_curent + 1}/{len(melodii)}"
+        )
     else:
         titlu_curent.set("NO TRACK SELECTED")
         status.set("SYSTEM READY // WAITING FOR INPUT")
+
+
+
+
+def afiseaza_coperta(cale):
+    global coperta_foto
+
+    imagine = None
+
+    try:
+        taguri = ID3(cale)
+        coperti = taguri.getall("APIC")
+
+        if coperti:
+            imagine = Image.open(
+                io.BytesIO(coperti[0].data)
+            ).convert("RGB")
+
+    except Exception:
+        imagine = None
+
+    if imagine is None:
+        imagine = Image.new("RGB", (220, 220), PANEL)
+        desen = ImageDraw.Draw(imagine)
+        desen.text((55, 100), "FSOCIETY", fill=RED)
+
+    imagine.thumbnail((220, 220))
+    coperta_foto = ImageTk.PhotoImage(imagine)
+    imagine_coperta.configure(image=coperta_foto)
+
+
 
 
 def adauga_muzica():
@@ -70,9 +151,51 @@ def adauga_muzica():
             adaugate += 1
 
     if adaugate:
+        salveaza_melodii()
         status.set(f"SYSTEM // {adaugate} TRACK(S) ADDED")
-        if index_curent == -1:
-            status.set(f"SYSTEM // {len(melodii)} TRACK(S) LOADED")
+
+
+def sterge_melodia():
+    global index_curent, este_pauza
+
+    selectie = lista_melodii.curselection()
+
+    if not selectie:
+        messagebox.showinfo(
+            "FSOCIETY",
+            "Selectează melodia pe care vrei să o ștergi."
+        )
+        return
+
+    index = selectie[0]
+    nume = os.path.basename(melodii[index])
+
+    confirmare = messagebox.askyesno(
+        "DELETE TRACK",
+        f"Vrei să elimini „{nume}” din bibliotecă?"
+    )
+
+    if not confirmare:
+        return
+
+    if index == index_curent:
+        if audio_functional:
+            pygame.mixer.music.stop()
+
+        index_curent = -1
+        este_pauza = False
+        titlu_curent.set("NO TRACK SELECTED")
+        imagine_coperta.configure(image="")
+
+    elif index < index_curent:
+        index_curent -= 1
+
+    melodii.pop(index)
+    lista_melodii.delete(index)
+    salveaza_melodii()
+    status.set(f"SYSTEM // TRACK REMOVED: {nume}")
+
+
 
 
 def reda_muzica():
@@ -93,12 +216,21 @@ def reda_muzica():
     elif index_curent == -1 and melodii:
         index_curent = 0
 
-    if not melodii or index_curent < 0:
+    if not melodii or not (0 <= index_curent < len(melodii)):
         messagebox.showinfo("FSOCIETY", "Adauga mai intai o melodie.")
         return
 
+    cale = melodii[index_curent]
+
+    if not os.path.isfile(cale):
+        messagebox.showerror(
+            "FSOCIETY",
+            "Fișierul audio nu mai există."
+        )
+        return
+
     try:
-        pygame.mixer.music.load(melodii[index_curent])
+        pygame.mixer.music.load(cale)
         pygame.mixer.music.set_volume(volum)
         pygame.mixer.music.play()
         este_pauza = False
@@ -108,11 +240,12 @@ def reda_muzica():
         lista_melodii.activate(index_curent)
 
         actualizeaza_titlu()
+        afiseaza_coperta(cale)
 
     except pygame.error as eroare:
         messagebox.showerror(
             "Playback error",
-            f"Melodia nu a putut fi redata:\n{eroare}"
+            f"Melodia nu a putut fi redată:\n{eroare}"
         )
 
 
@@ -126,10 +259,12 @@ def pauza_muzica():
         pygame.mixer.music.unpause()
         este_pauza = False
         status.set("PLAYBACK // RESUMED")
+
     elif pygame.mixer.music.get_busy():
         pygame.mixer.music.pause()
         este_pauza = True
         status.set("PLAYBACK // PAUSED")
+
     else:
         reda_muzica()
 
@@ -150,8 +285,18 @@ def reda_urmatoarea():
     if not melodii:
         return
 
-    index_curent = (index_curent + 1) % len(melodii)
+    if shuffle_activ and len(melodii) > 1:
+        optiuni = [
+            i for i in range(len(melodii))
+            if i != index_curent
+        ]
+        index_curent = random.choice(optiuni)
+
+    else:
+        index_curent = (index_curent + 1) % len(melodii)
+
     este_pauza = False
+    lista_melodii.selection_clear(0, tk.END)
     reda_muzica()
 
 
@@ -163,7 +308,22 @@ def reda_anterioara():
 
     index_curent = (index_curent - 1) % len(melodii)
     este_pauza = False
+    lista_melodii.selection_clear(0, tk.END)
     reda_muzica()
+
+
+def comuta_shuffle():
+    global shuffle_activ
+
+    shuffle_activ = not shuffle_activ
+
+    if shuffle_activ:
+        buton_shuffle.config(text="SHUFFLE: ON", bg=RED)
+        status.set("PLAYBACK // SHUFFLE ENABLED")
+
+    else:
+        buton_shuffle.config(text="SHUFFLE: OFF", bg=RED_DARK)
+        status.set("PLAYBACK // SHUFFLE DISABLED")
 
 
 def schimba_volumul(valoare):
@@ -180,6 +340,8 @@ def reda_selectia(event=None):
 
 
 def inchide_aplicatia():
+    salveaza_melodii()
+
     if audio_functional:
         pygame.mixer.music.stop()
         pygame.mixer.quit()
@@ -189,27 +351,51 @@ def inchide_aplicatia():
 
 
 
+
 bara_laterala = tk.Frame(fereastra, bg=PANEL, width=210)
 bara_laterala.pack(side="left", fill="y")
 bara_laterala.pack_propagate(False)
 
-logo = tk.Label(
+tk.Label(
     bara_laterala,
     text="FSOCIETY",
     bg=PANEL,
     fg=RED,
     font=("Consolas", 22, "bold")
-)
-logo.pack(pady=(30, 5))
+).pack(pady=(30, 5))
 
-sub_logo = tk.Label(
+tk.Label(
     bara_laterala,
     text="// AUDIO TERMINAL",
     bg=PANEL,
     fg=GREY,
     font=("Consolas", 9)
+).pack(pady=(0, 35))
+
+
+
+
+
+zona_principala = tk.Frame(fereastra, bg=BG)
+zona_principala.pack(side="left", fill="both", expand=True)
+
+titlu_pagina = tk.Label(
+    zona_principala,
+    text="// HOME",
+    bg=BG,
+    fg=RED,
+    font=("Consolas", 16, "bold"),
+    anchor="w"
 )
-sub_logo.pack(pady=(0, 35))
+titlu_pagina.pack(fill="x", padx=30, pady=(25, 15))
+
+continut_pagina = tk.Frame(zona_principala, bg=BG)
+continut_pagina.pack(fill="both", expand=True, padx=30, pady=5)
+
+pagina_home = tk.Frame(continut_pagina, bg=BG)
+pagina_now_playing = tk.Frame(continut_pagina, bg=BG)
+pagina_library = tk.Frame(continut_pagina, bg=BG)
+pagina_playlist = tk.Frame(continut_pagina, bg=BG)
 
 
 def schimba_pagina(nume):
@@ -219,14 +405,14 @@ def schimba_pagina(nume):
     for widget in continut_pagina.winfo_children():
         widget.pack_forget()
 
-    if nume == "HOME":
-        pagina_home.pack(fill="both", expand=True)
-    elif nume == "NOW PLAYING":
-        pagina_now_playing.pack(fill="both", expand=True)
-    elif nume == "LIBRARY":
-        pagina_library.pack(fill="both", expand=True)
-    elif nume == "PLAYLIST":
-        pagina_playlist.pack(fill="both", expand=True)
+    pagini = {
+        "HOME": pagina_home,
+        "NOW PLAYING": pagina_now_playing,
+        "LIBRARY": pagina_library,
+        "PLAYLIST": pagina_playlist
+    }
+
+    pagini[nume].pack(fill="both", expand=True)
 
 
 def buton_meniu(text, comanda):
@@ -263,31 +449,6 @@ tk.Label(
     fg=RED,
     font=("Consolas", 10)
 ).pack(side="bottom", pady=25)
-
-
-
-
-zona_principala = tk.Frame(fereastra, bg=BG)
-zona_principala.pack(side="left", fill="both", expand=True)
-
-titlu_pagina = tk.Label(
-    zona_principala,
-    text="// HOME",
-    bg=BG,
-    fg=RED,
-    font=("Consolas", 16, "bold"),
-    anchor="w"
-)
-titlu_pagina.pack(fill="x", padx=30, pady=(25, 15))
-
-continut_pagina = tk.Frame(zona_principala, bg=BG)
-continut_pagina.pack(fill="both", expand=True, padx=30, pady=5)
-
-pagina_home = tk.Frame(continut_pagina, bg=BG)
-pagina_now_playing = tk.Frame(continut_pagina, bg=BG)
-pagina_library = tk.Frame(continut_pagina, bg=BG)
-pagina_playlist = tk.Frame(continut_pagina, bg=BG)
-
 
 
 
@@ -342,7 +503,7 @@ tk.Label(
     bg=BG,
     fg=GREY,
     font=("Consolas", 11)
-).pack(anchor="w", pady=(40, 15))
+).pack(anchor="w", pady=(15, 5))
 
 tk.Label(
     pagina_now_playing,
@@ -354,13 +515,22 @@ tk.Label(
     justify="left"
 ).pack(anchor="w", pady=10)
 
+imagine_coperta = tk.Label(
+    pagina_now_playing,
+    bg=PANEL,
+    width=220,
+    height=220
+)
+imagine_coperta.pack(anchor="w", pady=10)
+
 tk.Label(
     pagina_now_playing,
     text="Use the controls below to manage playback.",
     bg=BG,
     fg=GREY,
     font=("Consolas", 10)
-).pack(anchor="w", pady=10)
+).pack(anchor="w", pady=5)
+
 
 
 
@@ -401,7 +571,23 @@ tk.Button(
     padx=15,
     pady=9,
     cursor="hand2"
+).pack(anchor="w", pady=(0, 8))
+
+tk.Button(
+    pagina_library,
+    text="- DELETE TRACK",
+    command=sterge_melodia,
+    bg=RED_DARK,
+    fg=WHITE,
+    activebackground=RED,
+    activeforeground=WHITE,
+    font=("Consolas", 10, "bold"),
+    bd=0,
+    padx=15,
+    pady=9,
+    cursor="hand2"
 ).pack(anchor="w")
+
 
 
 
@@ -439,7 +625,6 @@ tk.Button(
 
 
 
-
 bara_player = tk.Frame(zona_principala, bg=PANEL)
 bara_player.pack(side="bottom", fill="x", padx=15, pady=15)
 
@@ -474,18 +659,34 @@ def buton_player(text, comanda, accent=False):
         fg=WHITE,
         activebackground=RED,
         activeforeground=WHITE,
-        font=("Consolas", 11, "bold"),
+        font=("Consolas", 10, "bold"),
         bd=0,
-        padx=14,
+        padx=11,
         pady=7,
         cursor="hand2"
     )
 
 
-buton_player("<<", reda_anterioara).pack(side="left", padx=4)
-buton_player("PLAY / PAUSE", pauza_muzica, True).pack(side="left", padx=4)
-buton_player("STOP", opreste_muzica).pack(side="left", padx=4)
-buton_player(">>", reda_urmatoarea).pack(side="left", padx=4)
+buton_player("<<", reda_anterioara).pack(side="left", padx=3)
+buton_player("PLAY / PAUSE", pauza_muzica, True).pack(side="left", padx=3)
+buton_player("STOP", opreste_muzica).pack(side="left", padx=3)
+buton_player(">>", reda_urmatoarea).pack(side="left", padx=3)
+
+buton_shuffle = tk.Button(
+    controale,
+    text="SHUFFLE: OFF",
+    command=comuta_shuffle,
+    bg=RED_DARK,
+    fg=WHITE,
+    activebackground=RED,
+    activeforeground=WHITE,
+    font=("Consolas", 9, "bold"),
+    bd=0,
+    padx=10,
+    pady=7,
+    cursor="hand2"
+)
+buton_shuffle.pack(side="left", padx=3)
 
 tk.Label(
     controale,
@@ -493,7 +694,7 @@ tk.Label(
     bg=PANEL,
     fg=GREY,
     font=("Consolas", 9)
-).pack(side="left", padx=(15, 4))
+).pack(side="left", padx=(10, 4))
 
 slider_volum = tk.Scale(
     controale,
@@ -507,13 +708,20 @@ slider_volum = tk.Scale(
     activebackground=RED,
     highlightthickness=0,
     bd=0,
-    length=120
+    length=100
 )
 slider_volum.set(70)
-slider_volum.pack(side="left", padx=4)
+slider_volum.pack(side="left", padx=3)
 
 
 
+melodii = incarca_melodii()
+
+for melodie in melodii:
+    lista_melodii.insert(tk.END, os.path.basename(melodie))
+
+if melodii:
+    status.set(f"SYSTEM // {len(melodii)} TRACK(S) RESTORED")
 
 schimba_pagina("HOME")
 fereastra.protocol("WM_DELETE_WINDOW", inchide_aplicatia)
